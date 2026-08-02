@@ -1,10 +1,24 @@
-export type Tool = "point" | "square" | "circle" | "spray" | "fill";
+export type Tool = "point" | "square" | "circle" | "spray" | "fill" | "select" | "move";
 
 export type PixelMap = Record<string, string>;
 
 export interface Point {
   x: number;
   y: number;
+}
+
+export interface SelectionRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface MoveSelectionResult {
+  pixels: PixelMap;
+  selection: SelectionRect;
+  dx: number;
+  dy: number;
 }
 
 export interface PaletteColor {
@@ -77,6 +91,135 @@ export function parsePixelKey(key: string): Point | null {
   }
 
   return { x, y };
+}
+
+/**
+ * Creates an inclusive rectangular selection. The drag may end outside the
+ * grid, but it must start inside it.
+ */
+export function selectionRectFromPoints(
+  start: Point,
+  end: Point,
+  width: number,
+  height: number,
+): SelectionRect | null {
+  if (
+    !Number.isSafeInteger(width) ||
+    !Number.isSafeInteger(height) ||
+    width <= 0 ||
+    height <= 0 ||
+    !Number.isFinite(start.x) ||
+    !Number.isFinite(start.y) ||
+    !Number.isFinite(end.x) ||
+    !Number.isFinite(end.y)
+  ) {
+    return null;
+  }
+
+  const startX = Math.round(start.x);
+  const startY = Math.round(start.y);
+  if (startX < 0 || startY < 0 || startX >= width || startY >= height) {
+    return null;
+  }
+
+  const endX = Math.min(width - 1, Math.max(0, Math.round(end.x)));
+  const endY = Math.min(height - 1, Math.max(0, Math.round(end.y)));
+  const x = Math.min(startX, endX);
+  const y = Math.min(startY, endY);
+
+  return {
+    x,
+    y,
+    width: Math.abs(endX - startX) + 1,
+    height: Math.abs(endY - startY) + 1,
+  };
+}
+
+function pointInsideSelection(point: Point, selection: SelectionRect): boolean {
+  return (
+    point.x >= selection.x &&
+    point.y >= selection.y &&
+    point.x < selection.x + selection.width &&
+    point.y < selection.y + selection.height
+  );
+}
+
+/**
+ * Cuts a rectangular region from one layer and pastes it at a clamped offset.
+ * Empty cells are moved too, so they clear matching cells at the destination.
+ */
+export function movePixelSelection(
+  pixels: Readonly<PixelMap>,
+  selection: SelectionRect,
+  dx: number,
+  dy: number,
+  width: number,
+  height: number,
+): MoveSelectionResult {
+  if (
+    !Number.isSafeInteger(width) ||
+    !Number.isSafeInteger(height) ||
+    width <= 0 ||
+    height <= 0 ||
+    !Number.isInteger(selection.x) ||
+    !Number.isInteger(selection.y) ||
+    !Number.isInteger(selection.width) ||
+    !Number.isInteger(selection.height) ||
+    selection.width <= 0 ||
+    selection.height <= 0 ||
+    selection.x < 0 ||
+    selection.y < 0 ||
+    selection.x + selection.width > width ||
+    selection.y + selection.height > height
+  ) {
+    throw new Error("Selezione non valida.");
+  }
+
+  const requestedX = Number.isFinite(dx) ? Math.round(dx) : 0;
+  const requestedY = Number.isFinite(dy) ? Math.round(dy) : 0;
+  const actualX = Math.min(
+    width - selection.x - selection.width,
+    Math.max(-selection.x, requestedX),
+  );
+  const actualY = Math.min(
+    height - selection.y - selection.height,
+    Math.max(-selection.y, requestedY),
+  );
+  const destination: SelectionRect = {
+    ...selection,
+    x: selection.x + actualX,
+    y: selection.y + actualY,
+  };
+
+  const selectedPixels = Object.entries(pixels)
+    .map(([key, colorId]) => ({ point: parsePixelKey(key), colorId }))
+    .filter(
+      (entry): entry is { point: Point; colorId: string } =>
+        entry.point !== null && pointInsideSelection(entry.point, selection),
+    );
+  const result: PixelMap = { ...pixels };
+
+  for (const key of Object.keys(result)) {
+    const point = parsePixelKey(key);
+    if (
+      point &&
+      (pointInsideSelection(point, selection) ||
+        pointInsideSelection(point, destination))
+    ) {
+      delete result[key];
+    }
+  }
+
+  for (const { point, colorId } of selectedPixels) {
+    result[pixelKey(point.x + actualX, point.y + actualY)] = colorId;
+  }
+
+  return {
+    pixels: result,
+    selection: destination,
+    dx: actualX,
+    dy: actualY,
+  };
 }
 
 /**
@@ -168,7 +311,7 @@ export function stampCoordinates(
     y: Math.round(center.y),
   };
 
-  if (tool === "point" || tool === "fill") {
+  if (tool === "point" || tool === "fill" || tool === "select" || tool === "move") {
     return [integerCenter];
   }
 

@@ -2,7 +2,9 @@
 
 import {
   type ChangeEvent,
+  type Dispatch,
   type DragEvent,
+  type SetStateAction,
   useCallback,
   useEffect,
 
@@ -40,6 +42,8 @@ const TOOLS: Array<{
   { id: "circle", name: "Cerchio", key: "3", symbol: "●" },
   { id: "spray", name: "Spray", key: "4", symbol: "⁙" },
   { id: "fill", name: "Riempi", key: "5", symbol: "F" },
+  { id: "select", name: "Selezione rettangolare", key: "6", symbol: "S" },
+  { id: "move", name: "Sposta selezione", key: "7", symbol: "M" },
 ];
 
 let idCounter = 0;
@@ -174,7 +178,7 @@ async function renderRaster(
 }
 
 export default function PixelEditor() {
-  const [project, setProject] = useState<ProjectFile | null>(null);
+  const [project, setProjectState] = useState<ProjectFile | null>(null);
   const [tool, setTool] = useState<Tool>("point");
   const [eraserMode, setEraserMode] = useState(false);
   const [brushSize, setBrushSize] = useState(3);
@@ -185,16 +189,57 @@ export default function PixelEditor() {
   const [multiplierText, setMultiplierText] = useState("1");
   const [notice, setNotice] = useState<Notice | null>(null);
   const [fitToken, setFitToken] = useState(0);
+  const [selectionResetToken, setSelectionResetToken] = useState(0);
   const [draggedLayerId, setDraggedLayerId] = useState<string | null>(null);
   const [dragOverLayerId, setDragOverLayerId] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const projectRef = useRef<ProjectFile | null>(null);
+  const historyRef = useRef<ProjectFile[]>([]);
+
+  const setProject: Dispatch<SetStateAction<ProjectFile | null>> = useCallback(
+    (action) => {
+      setProjectState((current) => {
+        const next = typeof action === "function" ? action(current) : action;
+        projectRef.current = next;
+        return next;
+      });
+    },
+    [],
+  );
+
+  const checkpoint = useCallback(() => {
+    const current = projectRef.current;
+    if (!current) return;
+    historyRef.current = [...historyRef.current.slice(-99), current];
+  }, []);
+
+  const undo = useCallback(() => {
+    const previous = historyRef.current.pop();
+    if (!previous) return;
+    setProject(previous);
+    setActiveLayerId((current) =>
+      previous.layers.some((layer) => layer.id === current)
+        ? current
+        : (previous.layers[0]?.id ?? null),
+    );
+    setActiveColorId((current) =>
+      previous.palettes.some((palette) =>
+        palette.colors.some((color) => color.id === current),
+      )
+        ? current
+        : (previous.palettes.flatMap((palette) => palette.colors)[0]?.id ?? null),
+    );
+    setSelectionResetToken((value) => value + 1);
+  }, [setProject]);
 
   const showNotice = useCallback((tone: NoticeTone, text: string) => {
     setNotice({ tone, text });
   }, []);
 
   const openProject = useCallback((nextProject: ProjectFile) => {
+    historyRef.current = [];
+    projectRef.current = nextProject;
     setProject(nextProject);
     setActiveLayerId(nextProject.layers[0]?.id ?? null);
     setActiveColorId(nextProject.palettes.flatMap((palette) => palette.colors)[0]?.id ?? null);
@@ -202,7 +247,8 @@ export default function PixelEditor() {
     setEraserMode(false);
     setNotice(null);
     setFitToken((value) => value + 1);
-  }, []);
+    setSelectionResetToken((value) => value + 1);
+  }, [setProject]);
 
   const importFile = useCallback(
     async (file: File) => {
@@ -242,12 +288,20 @@ export default function PixelEditor() {
         return;
       }
 
+      if ((event.ctrlKey || event.metaKey) && event.code === "KeyZ" && !event.shiftKey) {
+        event.preventDefault();
+        undo();
+        return;
+      }
+
       const toolForCode: Partial<Record<KeyboardEvent["code"], Tool>> = {
         Digit1: "point",
         Digit2: "square",
         Digit3: "circle",
         Digit4: "spray",
         Digit5: "fill",
+        Digit6: "select",
+        Digit7: "move",
       };
       const nextTool = toolForCode[event.code];
       if (nextTool) {
@@ -263,7 +317,7 @@ export default function PixelEditor() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [project]);
+  }, [project, undo]);
 
   const exportJson = useCallback(() => {
     if (!project) {
@@ -330,8 +384,31 @@ export default function PixelEditor() {
     [exporting, multiplierText, project, showNotice],
   );
 
-  const addPaletteColor = useCallback((paletteId: string) => { const id = createId("color"); setProject((current) => current ? { ...current, palettes: current.palettes.map((palette) => palette.id === paletteId ? { ...palette, colors: [...palette.colors, { id, value: "#ffffff" }] } : palette) } : current); setActiveColorId(id); }, []);
-  const removePaletteColor = useCallback((paletteId: string, colorId: string) => { if (!project) return; const palette = project.palettes.find((item) => item.id === paletteId); if (!palette || !window.confirm("Rimuovere questo colore e tutti i pixel associati?")) return; setProject((current) => current ? { ...current, palettes: current.palettes.map((item) => item.id === paletteId ? { ...item, colors: item.colors.filter((color) => color.id !== colorId) } : item), layers: current.layers.map((layer) => ({ ...layer, pixels: Object.fromEntries(Object.entries(layer.pixels).filter(([, id]) => id !== colorId)) })) } : current); if (activeColorId === colorId) setActiveColorId(project.palettes.flatMap((item) => item.colors).find((color) => color.id !== colorId)?.id ?? null); }, [activeColorId, project]);
+  const addPaletteColor = useCallback((paletteId: string) => {
+    const id = createId("color");
+    checkpoint();
+    setProject((current) => current ? {
+      ...current,
+      palettes: current.palettes.map((palette) =>
+        palette.id === paletteId
+          ? { ...palette, colors: [...palette.colors, { id, value: "#ffffff" }] }
+          : palette,
+      ),
+    } : current);
+    setActiveColorId(id);
+  }, [checkpoint, setProject]);
+  const removePaletteColor = useCallback((paletteId: string, colorId: string) => {
+    if (!project) return;
+    const palette = project.palettes.find((item) => item.id === paletteId);
+    if (!palette || !window.confirm("Rimuovere questo colore e tutti i pixel associati?")) return;
+    checkpoint();
+    setProject((current) => current ? {
+      ...current,
+      palettes: current.palettes.map((item) => item.id === paletteId ? { ...item, colors: item.colors.filter((color) => color.id !== colorId) } : item),
+      layers: current.layers.map((layer) => ({ ...layer, pixels: Object.fromEntries(Object.entries(layer.pixels).filter(([, id]) => id !== colorId)) })),
+    } : current);
+    if (activeColorId === colorId) setActiveColorId(project.palettes.flatMap((item) => item.colors).find((color) => color.id !== colorId)?.id ?? null);
+  }, [activeColorId, checkpoint, project, setProject]);
 
   const updatePaletteColor = useCallback(
     (paletteId: string, colorId: string, value: string) => {
@@ -355,11 +432,12 @@ export default function PixelEditor() {
       });
       setActiveColorId(colorId);
     },
-    [],
+    [setProject],
   );
 
   const addLayer = useCallback(() => {
     const id = createId("layer");
+    checkpoint();
     setProject((current) => {
       if (!current) {
         return current;
@@ -373,7 +451,7 @@ export default function PixelEditor() {
       };
     });
     setActiveLayerId(id);
-  }, []);
+  }, [checkpoint, setProject]);
 
   const deleteLayer = useCallback(
     (layerId: string) => {
@@ -381,12 +459,13 @@ export default function PixelEditor() {
         return;
       }
       const remaining = project.layers.filter((layer) => layer.id !== layerId);
+      checkpoint();
       setProject({ ...project, layers: remaining });
       if (activeLayerId === layerId) {
         setActiveLayerId(remaining[0]?.id ?? null);
       }
     },
-    [activeLayerId, project],
+    [activeLayerId, checkpoint, project, setProject],
   );
 
   const renameLayer = useCallback((layerId: string, name: string) => {
@@ -401,7 +480,7 @@ export default function PixelEditor() {
         ),
       };
     });
-  }, []);
+  }, [setProject]);
 
   const handleLayerDrop = useCallback(
     (event: DragEvent<HTMLElement>, targetId: string) => {
@@ -413,6 +492,7 @@ export default function PixelEditor() {
       if (!sourceId || sourceId === targetId) {
         return;
       }
+      checkpoint();
       setProject((current) => {
         if (!current) {
           return current;
@@ -432,7 +512,7 @@ export default function PixelEditor() {
         return { ...current, layers: reordered };
       });
     },
-    [draggedLayerId],
+    [checkpoint, draggedLayerId, setProject],
   );
 
   if (!project) {
@@ -596,7 +676,7 @@ export default function PixelEditor() {
               <kbd>E</kbd>
             </button>
 
-            {tool !== "point" && tool !== "fill" ? (
+            {tool !== "point" && tool !== "fill" && tool !== "select" && tool !== "move" ? (
               <label className="range-control">
                 <span>
                   Dimensione
@@ -642,7 +722,7 @@ export default function PixelEditor() {
             <p className="interaction-hint">
               <span>Click destro</span> cancella
               <br />
-              <span>Spazio + trascina</span> sposta
+              <span>Tasto centrale + trascina</span> sposta
               <br />
               <span>Rotella</span> zoom
             </p>
@@ -683,6 +763,7 @@ export default function PixelEditor() {
                           <input
                             type="color"
                             value={color.value}
+                            onFocus={checkpoint}
                             onChange={(event) =>
                               updatePaletteColor(
                                 palette.id,
@@ -715,6 +796,8 @@ export default function PixelEditor() {
             spraySize={spraySize}
             spraySpread={spraySpread}
             fitToken={fitToken}
+            selectionResetToken={selectionResetToken}
+            onBeforeProjectChange={checkpoint}
             onNotice={showNotice}
           />
         </section>
@@ -762,7 +845,7 @@ export default function PixelEditor() {
                   }
                   onDrop={(event) => handleLayerDrop(event, layer.id)}
                 >
-                  <button type="button" className="layer-visibility" onClick={(event) => { event.stopPropagation(); setProject((current) => current ? { ...current, layers: current.layers.map((item) => item.id === layer.id ? { ...item, visible: !item.visible } : item) } : current); }} aria-label={`${layer.visible ? "Nascondi" : "Mostra"} ${layer.name || "livello"}`}>{layer.visible ? "●" : "○"}</button>
+                  <button type="button" className="layer-visibility" onClick={(event) => { event.stopPropagation(); checkpoint(); setProject((current) => current ? { ...current, layers: current.layers.map((item) => item.id === layer.id ? { ...item, visible: !item.visible } : item) } : current); }} aria-label={`${layer.visible ? "Nascondi" : "Mostra"} ${layer.name || "livello"}`}>{layer.visible ? "●" : "○"}</button>
                   <button
                     type="button"
                     className="drag-handle"
@@ -786,7 +869,10 @@ export default function PixelEditor() {
                     value={layer.name}
                     aria-label="Nome livello"
                     onClick={(event) => event.stopPropagation()}
-                    onFocus={() => setActiveLayerId(layer.id)}
+                    onFocus={() => {
+                      checkpoint();
+                      setActiveLayerId(layer.id);
+                    }}
                     onChange={(event) =>
                       renameLayer(layer.id, event.target.value)
                     }
@@ -817,15 +903,3 @@ export default function PixelEditor() {
     </main>
   );
 }
-
-
-
-
-
-
-
-
-
-
-
-

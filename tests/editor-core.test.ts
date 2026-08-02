@@ -4,11 +4,13 @@ import {
   compositeProject,
   floodFill,
   linePoints,
+  movePixelSelection,
   parsePixelKey,
   parseProjectJson,
   pixelKey,
   projectColorMap,
   projectToSvg,
+  selectionRectFromPoints,
   serializeProject,
   stampCoordinates,
   validateProjectFile,
@@ -109,6 +111,60 @@ describe("coordinate e geometrie", () => {
   });
 });
 
+describe("selezione rettangolare", () => {
+  it("normalizza il trascinamento e limita la fine alla griglia", () => {
+    expect(selectionRectFromPoints({ x: 3, y: 2 }, { x: -4, y: -3 }, 5, 4)).toEqual({
+      x: 0,
+      y: 0,
+      width: 4,
+      height: 3,
+    });
+    expect(selectionRectFromPoints({ x: -1, y: 0 }, { x: 2, y: 2 }, 5, 4)).toBeNull();
+  });
+
+  it("sposta anche la trasparenza senza mutare il livello", () => {
+    const initial = {
+      "0,0": "red",
+      "1,1": "blue",
+      "2,0": "old",
+      "3,0": "old",
+      "2,1": "old",
+      "3,1": "old",
+      "4,0": "keep",
+    };
+    const moved = movePixelSelection(
+      initial,
+      { x: 0, y: 0, width: 2, height: 2 },
+      2,
+      0,
+      5,
+      3,
+    );
+
+    expect(initial["0,0"]).toBe("red");
+    expect(moved.pixels).toEqual({
+      "2,0": "red",
+      "3,1": "blue",
+      "4,0": "keep",
+    });
+    expect(moved.selection).toEqual({ x: 2, y: 0, width: 2, height: 2 });
+  });
+
+  it("limita lo spostamento per mantenere tutta l'area nella griglia", () => {
+    const moved = movePixelSelection(
+      { "2,1": "red" },
+      { x: 2, y: 1, width: 2, height: 2 },
+      20,
+      20,
+      5,
+      4,
+    );
+    expect(moved.dx).toBe(1);
+    expect(moved.dy).toBe(1);
+    expect(moved.selection).toEqual({ x: 3, y: 2, width: 2, height: 2 });
+    expect(moved.pixels).toEqual({ "3,2": "red" });
+  });
+});
 describe("disegno e compositing", () => {
   it("dipinge nei bounds senza mutare i pixel iniziali", () => {
     const initial = { "0,0": "blue" };
