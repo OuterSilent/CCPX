@@ -47,6 +47,10 @@ yarn-error.log*
 /public/window.svg
 
 # env files (can opt-in for committing if needed)
+/.openai/
+/build/
+/worker/
+
 .env*
 
 # vercel

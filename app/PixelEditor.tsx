@@ -30,6 +30,7 @@ import SetupScreen from "./editor/SetupScreen";
 type NoticeTone = "ok" | "error";
 
 const APP_VERSION = "1.03";
+const PUBLIC_BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 const DEFAULT_GRID_COLOR = "#222731";
 const DEFAULT_TRANSPARENCY_LINE_OPACITY = 50;
 
@@ -922,7 +923,7 @@ export default function PixelEditor() {
       <div className="editor-workspace" inert={aboutOpen} aria-hidden={aboutOpen}>
         <aside className="side-panel tools-panel" aria-label="Tools and palette">
           <div className="side-brand">
-            <img className="brand-mark" src="./logo.png" alt="" />
+            <img className="brand-mark" src={`${PUBLIC_BASE_PATH}/logo.png`} alt="" />
             <div>
               <div className="brand-title">
                 <strong>CCPX</strong>
@@ -1540,7 +1541,7 @@ export default function PixelEditor() {
                     <strong>Support CCPX on Ko-fi</strong>
                     <span>If you find this software useful or fun, consider donating to help keep the project active.</span>
                   </span>
-                  <img className="kofi-logo" src="/kofi-logo.png" alt="" aria-hidden="true" />
+                  <img className="kofi-logo" src={`${PUBLIC_BASE_PATH}/kofi-logo.png`} alt="" aria-hidden="true" />
                 </a>
               </div>
             ) : aboutTab === "tutorial" ? (
@@ -1598,7 +1599,7 @@ export default function PixelEditor() {
             ) : (
               <div className="about-creator" id="creator-panel" role="tabpanel" aria-labelledby="creator-tab">
                 <div className="creator-logo-frame">
-                  <img className="creator-logo" src="/outer-logo.png" alt="OuterTales logo" />
+                  <img className="creator-logo" src={`${PUBLIC_BASE_PATH}/outer-logo.png`} alt="OuterTales logo" />
                 </div>
                 <section className="creator-profile">
                   <span className="creator-eyebrow">Creator of CCPX</span>
