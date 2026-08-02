@@ -24,6 +24,7 @@ export interface MoveSelectionResult {
 export interface PaletteColor {
   id: string;
   value: string;
+  alpha?: number;
 }
 
 export interface Palette {
@@ -49,6 +50,13 @@ export interface ProjectFile {
   height: number;
   palettes: Palette[];
   layers: Layer[];
+}
+
+export interface ResizeBounds {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
 }
 
 export interface StampOptions {
@@ -172,7 +180,7 @@ export function movePixelSelection(
     selection.x + selection.width > width ||
     selection.y + selection.height > height
   ) {
-    throw new Error("Selezione non valida.");
+    throw new Error("Invalid selection.");
   }
 
   const requestedX = Number.isFinite(dx) ? Math.round(dx) : 0;
@@ -334,7 +342,7 @@ export function stampCoordinates(
   }
 
   const random = options.random ?? Math.random;
-  const probability = spread / 100;
+  const probability = Math.pow(spread / 100, 1.5);
   return circle.filter(() => random() < probability);
 }
 
@@ -351,7 +359,7 @@ export function applyStamp(
   const erase = options.erase === true || options.colorId === null;
 
   if (!erase && (!options.colorId || typeof options.colorId !== "string")) {
-    throw new Error("Serve un colorId per disegnare.");
+    throw new Error("A colorId is required to draw.");
   }
 
   for (const point of coordinates) {
@@ -404,7 +412,7 @@ export function floodFill(
   } else if (typeof options.colorId === "string" && options.colorId.length > 0) {
     replacement = options.colorId;
   } else {
-    throw new Error("Serve un colorId per riempire.");
+    throw new Error("A colorId is required to fill.");
   }
 
   const startKey = pixelKey(start.x, start.y);
@@ -482,12 +490,98 @@ export function compositeProject(project: ProjectFile): PixelMap {
   return compositeLayers(project.layers);
 }
 
+/** Merges two layers into the drop target. The visually higher layer wins. */
+export function mergeProjectLayers(
+  project: ProjectFile,
+  sourceLayerId: string,
+  targetLayerId: string,
+): ProjectFile {
+  if (sourceLayerId === targetLayerId) return project;
+
+  const sourceIndex = project.layers.findIndex((layer) => layer.id === sourceLayerId);
+  const targetIndex = project.layers.findIndex((layer) => layer.id === targetLayerId);
+  if (sourceIndex < 0 || targetIndex < 0) return project;
+
+  const source = project.layers[sourceIndex];
+  const target = project.layers[targetIndex];
+  const higher = sourceIndex < targetIndex ? source : target;
+  const lower = sourceIndex < targetIndex ? target : source;
+  const pixels = { ...lower.pixels, ...higher.pixels };
+
+  return {
+    ...project,
+    layers: project.layers
+      .filter((layer) => layer.id !== sourceLayerId)
+      .map((layer) =>
+        layer.id === targetLayerId ? { ...layer, pixels } : layer,
+      ),
+  };
+}
+
+/**
+ * Crops or expands a project to half-open bounds and makes their top-left
+ * corner the new origin.
+ */
+export function resizeProject(
+  project: ProjectFile,
+  bounds: ResizeBounds,
+): ProjectFile {
+  if (
+    !Number.isSafeInteger(bounds.left) ||
+    !Number.isSafeInteger(bounds.top) ||
+    !Number.isSafeInteger(bounds.right) ||
+    !Number.isSafeInteger(bounds.bottom)
+  ) {
+    throw new Error("Resize bounds must be safe integers.");
+  }
+
+  const width = Math.max(1, bounds.right - bounds.left);
+  const height = Math.max(1, bounds.bottom - bounds.top);
+
+  return {
+    version: 1,
+    width,
+    height,
+    palettes: project.palettes.map((palette) => ({
+      id: palette.id,
+      name: palette.name,
+      colors: palette.colors.map((color) => ({ ...color })),
+    })),
+    layers: project.layers.map((layer) => {
+      const pixels: PixelMap = {};
+      for (const [key, colorId] of Object.entries(layer.pixels)) {
+        const point = parsePixelKey(key);
+        if (
+          point &&
+          point.x >= bounds.left &&
+          point.x < bounds.right &&
+          point.y >= bounds.top &&
+          point.y < bounds.bottom
+        ) {
+          pixels[pixelKey(point.x - bounds.left, point.y - bounds.top)] = colorId;
+        }
+      }
+      return { ...layer, pixels };
+    }),
+  };
+}
+
 export function projectColorMap(
   project: Pick<ProjectFile, "palettes">,
 ): Map<string, string> {
   return new Map(
     project.palettes.flatMap((palette) =>
       palette.colors.map((color) => [color.id, color.value] as const),
+    ),
+  );
+}
+
+export function projectColorAlphaMap(
+  project: Pick<ProjectFile, "palettes">,
+): Map<string, number> {
+  return new Map(
+    project.palettes.flatMap((palette) =>
+      palette.colors.map((color) => [color.id, color.alpha ?? 1] as const),
     ),
   );
 }
@@ -503,6 +597,7 @@ function projectData(project: ProjectFile): ProjectFile {
       colors: palette.colors.map((color) => ({
         id: color.id,
         value: color.value,
+        ...(color.alpha === undefined ? {} : { alpha: color.alpha }),
       })),
     })),
     layers: project.layers.map((layer) => ({
@@ -538,28 +633,28 @@ function expectRecord(
   context: string,
 ): Record<string, unknown> {
   if (!isRecord(value)) {
-    throw new Error(`${context} deve essere un oggetto.`);
+    throw new Error(`${context} must be an object.`);
   }
   return value;
 }
 
 function expectNonEmptyString(value: unknown, context: string): string {
   if (typeof value !== "string" || value.trim().length === 0) {
-    throw new Error(`${context} deve essere una stringa non vuota.`);
+    throw new Error(`${context} must be a non-empty string.`);
   }
   return value;
 }
 
 function expectString(value: unknown, context: string): string {
   if (typeof value !== "string") {
-    throw new Error(`${context} deve essere una stringa.`);
+    throw new Error(`${context} must be a string.`);
   }
   return value;
 }
 
 function expectArray(value: unknown, context: string): unknown[] {
   if (!Array.isArray(value)) {
-    throw new Error(`${context} deve essere un array.`);
+    throw new Error(`${context} must be an array.`);
   }
   return value;
 }
@@ -570,7 +665,7 @@ function assertUnique(
   context: string,
 ): void {
   if (seen.has(id)) {
-    throw new Error(`${context}: ID duplicato "${id}".`);
+    throw new Error(`${context}: Duplicate ID "${id}".`);
   }
   seen.add(id);
 }
@@ -579,20 +674,20 @@ function assertUnique(
  * Validates and clones unknown input into the exact persisted v1 shape.
  */
 export function validateProjectFile(value: unknown): ProjectFile {
-  const root = expectRecord(value, "Il progetto");
+  const root = expectRecord(value, "The project");
   if (root.version !== 1) {
-    throw new Error("Versione progetto non supportata: è richiesta la versione 1.");
+    throw new Error("Unsupported project version: version 1 is required.");
   }
   if (!Number.isSafeInteger(root.width) || (root.width as number) <= 0) {
-    throw new Error("La larghezza deve essere un intero positivo.");
+    throw new Error("Width must be a positive integer.");
   }
   if (!Number.isSafeInteger(root.height) || (root.height as number) <= 0) {
-    throw new Error("L'altezza deve essere un intero positivo.");
+    throw new Error("Height must be a positive integer.");
   }
 
   const rawPalettes = expectArray(root.palettes, "palettes");
-  if (rawPalettes.length === 0) {
-    throw new Error("Il progetto deve contenere almeno una palette.");
+  if (rawPalettes.length !== 1) {
+    throw new Error("The project must contain exactly one palette.");
   }
 
   const paletteIds = new Set<string>();
@@ -606,17 +701,33 @@ export function validateProjectFile(value: unknown): ProjectFile {
     const rawColors = expectArray(palette.colors, `${context}.colors`);
 
     const colors: PaletteColor[] = rawColors.map((rawColor, colorIndex) => {
-      const colorContext = `${context}, colore ${colorIndex + 1}`;
+      const colorContext = `${context}, color ${colorIndex + 1}`;
       const color = expectRecord(rawColor, colorContext);
       const colorId = expectNonEmptyString(color.id, `${colorContext}.id`);
       assertUnique(colorId, colorIds, colorContext);
       const colorValue = expectString(color.value, `${colorContext}.value`);
       if (!HEX_COLOR_PATTERN.test(colorValue)) {
         throw new Error(
-          `${colorContext}.value deve usare il formato #RRGGBB.`,
+          `${colorContext}.value must use the #RRGGBB format.`,
         );
       }
-      return { id: colorId, value: colorValue };
+      const alpha = color.alpha;
+      if (
+        alpha !== undefined &&
+        (typeof alpha !== "number" ||
+          !Number.isFinite(alpha) ||
+          alpha < 0 ||
+          alpha > 1)
+      ) {
+        throw new Error(
+          `${colorContext}.alpha must be between 0 and 1.`,
+        );
+      }
+      return {
+        id: colorId,
+        value: colorValue,
+        ...(alpha === undefined ? {} : { alpha }),
+      };
     });
 
     return { id, name, colors };
@@ -624,14 +735,14 @@ export function validateProjectFile(value: unknown): ProjectFile {
 
   const rawLayers = expectArray(root.layers, "layers");
   if (rawLayers.length === 0) {
-    throw new Error("Il progetto deve contenere almeno un livello.");
+    throw new Error("The project must contain at least one layer.");
   }
 
   const layerIds = new Set<string>();
   const width = root.width as number;
   const height = root.height as number;
   const layers: Layer[] = rawLayers.map((rawLayer, layerIndex) => {
-    const context = `Livello ${layerIndex + 1}`;
+    const context = `Layer ${layerIndex + 1}`;
     const layer = expectRecord(rawLayer, context);
     const id = expectNonEmptyString(layer.id, `${context}.id`);
     assertUnique(id, layerIds, context);
@@ -639,7 +750,7 @@ export function validateProjectFile(value: unknown): ProjectFile {
     let visible = true;
     if (Object.prototype.hasOwnProperty.call(layer, "visible")) {
       if (typeof layer.visible !== "boolean") {
-        throw new Error(`${context}.visible deve essere un booleano.`);
+        throw new Error(`${context}.visible must be a boolean.`);
       }
       visible = layer.visible;
     }
@@ -656,11 +767,11 @@ export function validateProjectFile(value: unknown): ProjectFile {
         point.x >= width ||
         point.y >= height
       ) {
-        throw new Error(`${context}: coordinata pixel non valida "${key}".`);
+        throw new Error(`${context}: invalid pixel coordinate "${key}".`);
       }
       if (typeof rawColorId !== "string" || !colorIds.has(rawColorId)) {
         throw new Error(
-          `${context}: il pixel "${key}" usa un colorId inesistente.`,
+          `${context}: pixel "${key}" uses an unknown colorId.`,
         );
       }
       pixels[key] = rawColorId;
@@ -686,7 +797,7 @@ export function parseProjectJson(json: string): ProjectFile {
   try {
     value = JSON.parse(json) as unknown;
   } catch {
-    throw new Error("JSON non valido: impossibile leggere il file.");
+    throw new Error("Invalid JSON: unable to read the file.");
   }
 
   return validateProjectFile(value);
@@ -716,6 +827,7 @@ function sortedPixelEntries(pixels: PixelMap): [Point, string][] {
 export function projectToSvg(project: ProjectFile): string {
   const validProject = validateProjectFile(project);
   const colors = projectColorMap(validProject);
+  const alphas = projectColorAlphaMap(validProject);
   const groups = [...validProject.layers]
     .filter((layer) => layer.visible)
     .reverse()
@@ -725,9 +837,11 @@ export function projectToSvg(project: ProjectFile): string {
           const fill = colors.get(colorId);
           // Validation guarantees this branch cannot be reached.
           if (!fill) {
-            throw new Error(`Colore inesistente "${colorId}".`);
+            throw new Error(`Unknown color "${colorId}".`);
           }
-          return `    <rect x="${point.x}" y="${point.y}" width="1" height="1" fill="${fill}" />`;
+          const alpha = alphas.get(colorId) ?? 1;
+          const opacity = alpha < 1 ? ` fill-opacity="${alpha}"` : "";
+          return `    <rect x="${point.x}" y="${point.y}" width="1" height="1" fill="${fill}"${opacity} />`;
         })
         .join("\n");
       const title = `    <title>${escapeXml(layer.name)}</title>`;

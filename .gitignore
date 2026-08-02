@@ -27,6 +27,24 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
+# local deployment credentials
+/ftp_credentials.xml
+
+# optional starter and local-only files
+/Outer_logo.png
+/start.bat
+/app/chatgpt-auth.ts
+/db/
+/drizzle/
+/drizzle.config.ts
+/examples/
+/eslint.config.mjs
+/tests/
+/vitest.config.ts
+/public/favicon.svg
+/public/file.svg
+/public/globe.svg
+/public/window.svg
 
 # env files (can opt-in for committing if needed)
 .env*

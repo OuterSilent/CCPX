@@ -32,13 +32,14 @@ function createId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${fallbackId.toString(36)}`;
 }
 
-function createPalette(number: number): Palette {
+function createPalette(): Palette {
   return {
     id: createId("palette"),
-    name: `Palette ${number}`,
+    name: "Palette",
     colors: DEFAULT_COLORS.map((value) => ({
       id: createId("color"),
       value,
+      alpha: 1,
     })),
   };
 }
@@ -56,17 +57,9 @@ export default function SetupScreen({
   const [width, setWidth] = useState("32");
   const [height, setHeight] = useState("32");
   const [palettes, setPalettes] = useState<Palette[]>(() => [
-    createPalette(1),
+    createPalette(),
   ]);
   const [validationError, setValidationError] = useState<string | null>(null);
-
-  function updatePaletteName(paletteId: string, name: string) {
-    setPalettes((current) =>
-      current.map((palette) =>
-        palette.id === paletteId ? { ...palette, name } : palette,
-      ),
-    );
-  }
 
   function updateColor(
     paletteId: string,
@@ -87,20 +80,6 @@ export default function SetupScreen({
     );
   }
 
-  function addPalette() {
-    setPalettes((current) => [
-      ...current,
-      createPalette(current.length + 1),
-    ]);
-  }
-
-  function removePalette(paletteId: string) {
-    setPalettes((current) =>
-      current.length > 1
-        ? current.filter((palette) => palette.id !== paletteId)
-        : current,
-    );
-  }
 
   function addColor(paletteId: string) {
     setPalettes((current) =>
@@ -110,7 +89,7 @@ export default function SetupScreen({
               ...palette,
               colors: [
                 ...palette.colors,
-                { id: createId("color"), value: "#000000" },
+                { id: createId("color"), value: "#000000", alpha: 1 },
               ],
             }
           : palette,
@@ -137,13 +116,8 @@ export default function SetupScreen({
 
     if (!isPositiveSafeInteger(width) || !isPositiveSafeInteger(height)) {
       setValidationError(
-        "Larghezza e altezza devono essere numeri interi positivi.",
+        "Width and height must be positive integers.",
       );
-      return;
-    }
-
-    if (palettes.some((palette) => palette.name.trim().length === 0)) {
-      setValidationError("Assegna un nome a ogni palette.");
       return;
     }
 
@@ -159,7 +133,7 @@ export default function SetupScreen({
       layers: [
         {
           id: createId("layer"),
-          name: "Livello 1",
+          name: "Layer 1",
           visible: true,
           pixels: {},
         },
@@ -177,11 +151,11 @@ export default function SetupScreen({
     <section className="setup-screen" aria-labelledby="setup-title">
       <div className="setup-card">
         <header className="setup-header">
-          <p className="setup-eyebrow">CCPX Pixel Editor</p>
-          <h1 id="setup-title">Nuovo progetto</h1>
+          <p className="setup-eyebrow">CCPX Pixel Editor · v1.03</p>
+          <h1 id="setup-title">New project</h1>
           <p className="setup-description">
-            Scegli le dimensioni del canvas e prepara i colori prima di
-            iniziare.
+            Choose the canvas dimensions and prepare your colors before
+            you begin.
           </p>
         </header>
 
@@ -196,10 +170,10 @@ export default function SetupScreen({
 
         <form className="setup-form" onSubmit={createProject} noValidate>
           <fieldset className="setup-section setup-dimensions">
-            <legend>Dimensioni</legend>
+            <legend>Dimensions</legend>
             <div className="setup-dimension-grid">
               <label className="setup-field">
-                <span>Larghezza</span>
+                <span>Width</span>
                 <input
                   type="number"
                   min="1"
@@ -217,7 +191,7 @@ export default function SetupScreen({
               </span>
 
               <label className="setup-field">
-                <span>Altezza</span>
+                <span>Height</span>
                 <input
                   type="number"
                   min="1"
@@ -233,57 +207,20 @@ export default function SetupScreen({
           </fieldset>
 
           <fieldset className="setup-section setup-palettes">
-            <div className="setup-section-heading">
-              <legend>Palette</legend>
-              <button
-                className="setup-secondary-button"
-                type="button"
-                onClick={addPalette}
-              >
-                + Aggiungi palette
-              </button>
-            </div>
+            <legend>Palette</legend>
+
 
             <div className="setup-palette-list">
-              {palettes.map((palette, paletteIndex) => (
+              {palettes.map((palette) => (
                 <article className="setup-palette" key={palette.id}>
-                  <div className="setup-palette-heading">
-                    <label className="setup-field setup-palette-name">
-                      <span>Nome palette {paletteIndex + 1}</span>
-                      <input
-                        type="text"
-                        value={palette.name}
-                        onChange={(event) =>
-                          updatePaletteName(palette.id, event.target.value)
-                        }
-                        aria-invalid={palette.name.trim().length === 0}
-                        required
-                      />
-                    </label>
-                    <button
-                      className="setup-icon-button"
-                      type="button"
-                      onClick={() => removePalette(palette.id)}
-                      disabled={palettes.length === 1}
-                      aria-label={`Rimuovi ${palette.name || `palette ${paletteIndex + 1}`}`}
-                      title={
-                        palettes.length === 1
-                          ? "Serve almeno una palette"
-                          : "Rimuovi palette"
-                      }
-                    >
-                      Rimuovi
-                    </button>
-                  </div>
-
                   <div
                     className="setup-color-list"
-                    aria-label={`Colori di ${palette.name || `palette ${paletteIndex + 1}`}`}
+                    aria-label="Palette colors"
                   >
                     {palette.colors.map((color, colorIndex) => (
                       <div className="setup-color" key={color.id}>
                         <label className="setup-color-picker">
-                          <span>Colore {colorIndex + 1}</span>
+                          <span>Color {colorIndex + 1}</span>
                           <input
                             type="color"
                             value={color.value}
@@ -304,11 +241,11 @@ export default function SetupScreen({
                           type="button"
                           onClick={() => removeColor(palette.id, color.id)}
                           disabled={palette.colors.length === 1}
-                          aria-label={`Rimuovi colore ${colorIndex + 1} da ${palette.name || `palette ${paletteIndex + 1}`}`}
+                          aria-label={`Remove color ${colorIndex + 1} from the palette`}
                           title={
                             palette.colors.length === 1
-                              ? "Serve almeno un colore"
-                              : "Rimuovi colore"
+                              ? "At least one color is required"
+                              : "Remove color"
                           }
                         >
                           ×
@@ -321,7 +258,7 @@ export default function SetupScreen({
                       type="button"
                       onClick={() => addColor(palette.id)}
                     >
-                      + Colore
+                      + Color
                     </button>
                   </div>
                 </article>
@@ -335,10 +272,10 @@ export default function SetupScreen({
               type="button"
               onClick={onImport}
             >
-              Importa JSON
+              Import JSON
             </button>
             <button className="setup-primary-button" type="submit">
-              Crea canvas
+              Create canvas
             </button>
           </div>
         </form>

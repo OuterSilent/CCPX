@@ -11,16 +11,17 @@ import {
 } from "react";
 import {
   applyStamp,
-  compositeProject,
   floodFill,
   linePoints,
   movePixelSelection,
   parsePixelKey,
+  projectColorAlphaMap,
   projectColorMap,
   selectionRectFromPoints,
   stampCoordinates,
   type Point,
   type ProjectFile,
+  type ResizeBounds,
   type SelectionRect,
   type Tool,
 } from "../editor-core";
@@ -37,19 +38,105 @@ export interface CanvasStageProps {
   brushSize: number;
   spraySize: number;
   spraySpread: number;
+  showGrid: boolean;
+  gridColor: string;
+  transparencyLineOpacity: number;
+  resizeBounds: ResizeBounds | null;
+  onResizeBoundsChange: (bounds: ResizeBounds) => void;
   fitToken: number;
   selectionResetToken: number;
   onBeforeProjectChange: () => void;
   onNotice: (tone: "ok" | "error", text: string) => void;
+  onZoomChange: (percent: number) => void;
 }
 
 const MIN_ZOOM = 0.0001;
 const MAX_ZOOM = 64;
+const RESIZE_HANDLE_OFFSET = 15;
+const RESIZE_HANDLE_RADIUS = 12;
+
+type ResizeSide = "left" | "right" | "top" | "bottom";
+
+type ResizeDrag = {
+  pointerId: number;
+  side: ResizeSide;
+  startX: number;
+  startY: number;
+  initial: ResizeBounds;
+};
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+function resizeHandleCenters(
+  bounds: ResizeBounds,
+  view: { zoom: number; panX: number; panY: number },
+): Record<ResizeSide, Point> {
+  const left = view.panX + bounds.left * view.zoom;
+  const right = view.panX + bounds.right * view.zoom;
+  const top = view.panY + bounds.top * view.zoom;
+  const bottom = view.panY + bounds.bottom * view.zoom;
+  const centerX = (left + right) / 2;
+  const centerY = (top + bottom) / 2;
+
+  return {
+    left: { x: left - RESIZE_HANDLE_OFFSET, y: centerY },
+    right: { x: right + RESIZE_HANDLE_OFFSET, y: centerY },
+    top: { x: centerX, y: top - RESIZE_HANDLE_OFFSET },
+    bottom: { x: centerX, y: bottom + RESIZE_HANDLE_OFFSET },
+  };
+}
+
+function drawResizeHandle(
+  context: CanvasRenderingContext2D,
+  side: ResizeSide,
+  point: Point,
+  highlighted: boolean,
+): void {
+  context.save();
+  context.translate(point.x, point.y);
+  context.fillStyle = highlighted ? "#3b3417" : "#17160f";
+  context.strokeStyle = "#ebcc34";
+  context.lineWidth = highlighted ? 2 : 1.5;
+  context.beginPath();
+  context.arc(0, 0, 10, 0, Math.PI * 2);
+  context.fill();
+  context.stroke();
+
+  context.beginPath();
+  if (side === "left") {
+    context.moveTo(4, 0);
+    context.lineTo(-4, 0);
+    context.moveTo(-4, 0);
+    context.lineTo(0, -4);
+    context.moveTo(-4, 0);
+    context.lineTo(0, 4);
+  } else if (side === "right") {
+    context.moveTo(-4, 0);
+    context.lineTo(4, 0);
+    context.moveTo(4, 0);
+    context.lineTo(0, -4);
+    context.moveTo(4, 0);
+    context.lineTo(0, 4);
+  } else if (side === "top") {
+    context.moveTo(0, 4);
+    context.lineTo(0, -4);
+    context.moveTo(0, -4);
+    context.lineTo(-4, 0);
+    context.moveTo(0, -4);
+    context.lineTo(4, 0);
+  } else {
+    context.moveTo(0, -4);
+    context.lineTo(0, 4);
+    context.moveTo(0, 4);
+    context.lineTo(-4, 0);
+    context.moveTo(0, 4);
+    context.lineTo(4, 0);
+  }
+  context.stroke();
+  context.restore();
+}
 
 export default function CanvasStage({
   project,
@@ -62,17 +149,27 @@ export default function CanvasStage({
   brushSize,
   spraySize,
   spraySpread,
+  showGrid,
+  gridColor,
+  transparencyLineOpacity,
+  resizeBounds,
+  onResizeBoundsChange,
   selectionResetToken,
   onBeforeProjectChange,
   fitToken,
   onNotice,
+  onZoomChange,
 }: CanvasStageProps) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const compositeRef = useRef<HTMLCanvasElement | null>(null);
   const drawingRef = useRef<{ pointerId: number; point: Point; erase: boolean } | null>(null);
   const panningRef = useRef<{ pointerId: number; x: number; y: number; panX: number; panY: number } | null>(null);
+  const resizeDragRef = useRef<ResizeDrag | null>(null);
   const [view, setView] = useState({ zoom: 12, panX: 0, panY: 0 });
+  useEffect(() => {
+    onZoomChange(Math.round(view.zoom * 100));
+  }, [onZoomChange, view.zoom]);
   const selectingRef = useRef<{ pointerId: number; start: Point } | null>(null);
   const movingRef = useRef<{ pointerId: number; start: Point; selection: SelectionRect; dx: number; dy: number } | null>(null);
   const currentColorId = colorId ?? activeColorId ?? null;
@@ -103,6 +200,7 @@ export default function CanvasStage({
     [activeLayerId, selectionResetToken],
   );
   const [movePreview, setMovePreview] = useState<Point | null>(null);
+  const [hoverResizeSide, setHoverResizeSide] = useState<ResizeSide | null>(null);
   const [isPanning, setIsPanning] = useState(false);
   const fit = useCallback(() => {
 
@@ -126,6 +224,12 @@ export default function CanvasStage({
     selectingRef.current = null;
     movingRef.current = null;
   }, [activeLayerId, selectionResetToken]);
+  useEffect(() => {
+    if (!resizeBounds) {
+      resizeDragRef.current = null;
+      setHoverResizeSide(null);
+    }
+  }, [resizeBounds]);
 
   useEffect(() => {
     const reset = () => {
@@ -133,7 +237,9 @@ export default function CanvasStage({
       panningRef.current = null;
       selectingRef.current = null;
       movingRef.current = null;
+      resizeDragRef.current = null;
       setMovePreview(null);
+      setHoverResizeSide(null);
       setIsPanning(false);
     };
     window.addEventListener("blur", reset);
@@ -148,10 +254,20 @@ export default function CanvasStage({
     if (!offscreen) return;
     offscreen.clearRect(0, 0, project.width, project.height); offscreen.imageSmoothingEnabled = false;
     const colors = projectColorMap(project);
-    for (const [key, id] of Object.entries(compositeProject(project))) {
-      const point = parsePixelKey(key), fill = colors.get(id);
-      if (point && fill) { offscreen.fillStyle = fill; offscreen.fillRect(point.x, point.y, 1, 1); }
+    const alphas = projectColorAlphaMap(project);
+    for (const layer of [...project.layers].reverse()) {
+      if (layer.visible === false) continue;
+      for (const [key, id] of Object.entries(layer.pixels)) {
+        const point = parsePixelKey(key);
+        const fill = colors.get(id);
+        if (point && fill) {
+          offscreen.globalAlpha = alphas.get(id) ?? 1;
+          offscreen.fillStyle = fill;
+          offscreen.fillRect(point.x, point.y, 1, 1);
+        }
+      }
     }
+    offscreen.globalAlpha = 1;
   }, [project]);
 
 
@@ -159,55 +275,126 @@ export default function CanvasStage({
     const canvas = canvasRef.current;
     const viewport = viewportRef.current;
     if (!canvas || !viewport) return;
+
     const rect = viewport.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
     const width = Math.max(1, Math.round(rect.width * dpr));
     const height = Math.max(1, Math.round(rect.height * dpr));
-    if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height; }
-    canvas.style.width = `${rect.width}px`; canvas.style.height = `${rect.height}px`;
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
+    }
+    canvas.style.width = `${rect.width}px`;
+    canvas.style.height = `${rect.height}px`;
+
     const context = canvas.getContext("2d");
     if (!context) return;
     context.setTransform(dpr, 0, 0, dpr, 0, 0);
     context.clearRect(0, 0, rect.width, rect.height);
+
     const { zoom, panX, panY } = view;
-    const documentWidth = project.width * zoom, documentHeight = project.height * zoom;
-    context.save(); context.beginPath(); context.rect(panX, panY, documentWidth, documentHeight); context.clip();
-    const visibleLeft = Math.max(0, panX);
-    const visibleTop = Math.max(0, panY);
-    const visibleRight = Math.min(rect.width, panX + documentWidth);
-    const visibleBottom = Math.min(rect.height, panY + documentHeight);
+    const bounds = resizeBounds ?? {
+      left: 0,
+      top: 0,
+      right: project.width,
+      bottom: project.height,
+    };
+    const documentLeft = panX + bounds.left * zoom;
+    const documentTop = panY + bounds.top * zoom;
+    const documentWidth = (bounds.right - bounds.left) * zoom;
+    const documentHeight = (bounds.bottom - bounds.top) * zoom;
+
+    context.save();
+    context.beginPath();
+    context.rect(documentLeft, documentTop, documentWidth, documentHeight);
+    context.clip();
+
+    const visibleLeft = Math.max(0, documentLeft);
+    const visibleTop = Math.max(0, documentTop);
+    const visibleRight = Math.min(rect.width, documentLeft + documentWidth);
+    const visibleBottom = Math.min(rect.height, documentTop + documentHeight);
+
     if (visibleRight > visibleLeft && visibleBottom > visibleTop) {
       context.fillStyle = "#f7f8fa";
-      context.fillRect(visibleLeft, visibleTop, visibleRight - visibleLeft, visibleBottom - visibleTop);
-      const stripeSpacing = 6;
-      const stripeOrigin = panX + panY;
-      const firstStripe = stripeOrigin + Math.floor((visibleLeft + visibleTop - stripeOrigin) / stripeSpacing) * stripeSpacing;
+      context.fillRect(
+        visibleLeft,
+        visibleTop,
+        visibleRight - visibleLeft,
+        visibleBottom - visibleTop,
+      );
+      const stripeSpacing = 5;
+      const stripeOrigin = documentLeft + documentTop;
+      const firstStripe =
+        stripeOrigin +
+        Math.floor((visibleLeft + visibleTop - stripeOrigin) / stripeSpacing) *
+          stripeSpacing;
       context.beginPath();
-      for (let diagonal = firstStripe; diagonal <= visibleRight + visibleBottom; diagonal += stripeSpacing) {
+      for (
+        let diagonal = firstStripe;
+        diagonal <= visibleRight + visibleBottom;
+        diagonal += stripeSpacing
+      ) {
         context.moveTo(diagonal - visibleBottom, visibleBottom);
         context.lineTo(diagonal - visibleTop, visibleTop);
       }
-      context.strokeStyle = "rgba(184, 190, 200, .38)";
-      context.lineWidth = 1;
+      const stripeOpacity = Math.pow(transparencyLineOpacity, 1.5);
+      context.strokeStyle = `rgba(126, 133, 145, ${stripeOpacity})`;
+      context.lineWidth = 1.5;
       context.stroke();
     }
+
     const composite = compositeRef.current;
     if (composite) {
       context.imageSmoothingEnabled = false;
-      context.drawImage(composite, panX, panY, documentWidth, documentHeight);
+      context.drawImage(
+        composite,
+        panX,
+        panY,
+        project.width * zoom,
+        project.height * zoom,
+      );
     }
-    if (zoom >= 8) {
-      context.strokeStyle = "rgba(34, 39, 49, .2)"; context.lineWidth = 1;
-      const firstColumn = clamp(Math.ceil((visibleLeft - panX) / zoom), 0, project.width);
-      const lastColumn = clamp(Math.floor((visibleRight - panX) / zoom), 0, project.width);
-      const firstRow = clamp(Math.ceil((visibleTop - panY) / zoom), 0, project.height);
-      const lastRow = clamp(Math.floor((visibleBottom - panY) / zoom), 0, project.height);
-      for (let x = firstColumn; x <= lastColumn; x++) { const p = panX + x * zoom; context.beginPath(); context.moveTo(p, visibleTop); context.lineTo(p, visibleBottom); context.stroke(); }
-      for (let y = firstRow; y <= lastRow; y++) { const p = panY + y * zoom; context.beginPath(); context.moveTo(visibleLeft, p); context.lineTo(visibleRight, p); context.stroke(); }
+
+    if (showGrid && zoom >= 8) {
+      context.strokeStyle = gridColor + "33";
+      context.lineWidth = 1;
+      const firstColumn = Math.max(
+        bounds.left,
+        Math.ceil((visibleLeft - panX) / zoom),
+      );
+      const lastColumn = Math.min(
+        bounds.right,
+        Math.floor((visibleRight - panX) / zoom),
+      );
+      const firstRow = Math.max(
+        bounds.top,
+        Math.ceil((visibleTop - panY) / zoom),
+      );
+      const lastRow = Math.min(
+        bounds.bottom,
+        Math.floor((visibleBottom - panY) / zoom),
+      );
+
+      for (let x = firstColumn; x <= lastColumn; x += 1) {
+        const position = panX + x * zoom;
+        context.beginPath();
+        context.moveTo(position, visibleTop);
+        context.lineTo(position, visibleBottom);
+        context.stroke();
+      }
+      for (let y = firstRow; y <= lastRow; y += 1) {
+        const position = panY + y * zoom;
+        context.beginPath();
+        context.moveTo(visibleLeft, position);
+        context.lineTo(visibleRight, position);
+        context.stroke();
+      }
     }
-    if (hoverPoint && (tool === "square" || tool === "circle")) {
+
+    if (!resizeBounds && hoverPoint && (tool === "square" || tool === "circle")) {
       const preview = stampCoordinates(tool, hoverPoint, { size: brushSize }).filter(
-        ({ x, y }) => x >= 0 && y >= 0 && x < project.width && y < project.height,
+        ({ x, y }) =>
+          x >= 0 && y >= 0 && x < project.width && y < project.height,
       );
       const footprint = new Set(preview.map(({ x, y }) => `${x},${y}`));
       const has = (x: number, y: number) => footprint.has(`${x},${y}`);
@@ -217,10 +404,22 @@ export default function CanvasStage({
         const top = panY + y * zoom;
         const right = left + zoom;
         const bottom = top + zoom;
-        if (!has(x, y - 1)) { context.moveTo(left, top); context.lineTo(right, top); }
-        if (!has(x + 1, y)) { context.moveTo(right, top); context.lineTo(right, bottom); }
-        if (!has(x, y + 1)) { context.moveTo(right, bottom); context.lineTo(left, bottom); }
-        if (!has(x - 1, y)) { context.moveTo(left, bottom); context.lineTo(left, top); }
+        if (!has(x, y - 1)) {
+          context.moveTo(left, top);
+          context.lineTo(right, top);
+        }
+        if (!has(x + 1, y)) {
+          context.moveTo(right, top);
+          context.lineTo(right, bottom);
+        }
+        if (!has(x, y + 1)) {
+          context.moveTo(right, bottom);
+          context.lineTo(left, bottom);
+        }
+        if (!has(x - 1, y)) {
+          context.moveTo(left, bottom);
+          context.lineTo(left, top);
+        }
       }
       context.setLineDash([4, 3]);
       context.lineWidth = 1.5;
@@ -228,7 +427,8 @@ export default function CanvasStage({
       context.stroke();
       context.setLineDash([]);
     }
-    if (selection) {
+
+    if (!resizeBounds && selection) {
       const dx = movePreview?.x ?? 0;
       const dy = movePreview?.y ?? 0;
       const left = panX + (selection.x + dx) * zoom;
@@ -239,8 +439,13 @@ export default function CanvasStage({
         context.setLineDash([3, 3]);
         context.lineWidth = 1;
         context.strokeStyle = "rgba(17, 24, 39, .35)";
-        context.strokeRect(panX + selection.x * zoom, panY + selection.y * zoom, width, height);
-        context.fillStyle = "rgba(59, 130, 246, .08)";
+        context.strokeRect(
+          panX + selection.x * zoom,
+          panY + selection.y * zoom,
+          width,
+          height,
+        );
+        context.fillStyle = "rgba(235, 204, 52, .1)";
         context.fillRect(left, top, width, height);
       }
       context.setLineDash([6, 4]);
@@ -249,17 +454,99 @@ export default function CanvasStage({
       context.strokeRect(left, top, width, height);
       context.setLineDash([]);
     }
-    context.restore(); context.strokeStyle = "rgba(15, 18, 25, .45)"; context.strokeRect(panX + .5, panY + .5, documentWidth - 1, documentHeight - 1);
-  }, [brushSize, hoverPoint, movePreview, project, selection, tool, view]);
 
+    context.restore();
+
+    if (resizeBounds) {
+      context.save();
+      context.strokeStyle = "#ebcc34";
+      context.lineWidth = 1.5;
+      context.strokeRect(
+        documentLeft + 0.75,
+        documentTop + 0.75,
+        Math.max(0, documentWidth - 1.5),
+        Math.max(0, documentHeight - 1.5),
+      );
+      context.strokeRect(
+        documentLeft - 2.25,
+        documentTop - 2.25,
+        documentWidth + 4.5,
+        documentHeight + 4.5,
+      );
+
+      const centers = resizeHandleCenters(resizeBounds, view);
+      const sides: ResizeSide[] = ["left", "right", "top", "bottom"];
+      for (const side of sides) {
+        drawResizeHandle(
+          context,
+          side,
+          centers[side],
+          hoverResizeSide === side,
+        );
+      }
+      context.restore();
+    } else {
+      context.strokeStyle = "rgba(15, 18, 25, .45)";
+      context.strokeRect(
+        panX + 0.5,
+        panY + 0.5,
+        project.width * zoom - 1,
+        project.height * zoom - 1,
+      );
+    }
+  }, [
+    brushSize,
+    gridColor,
+    hoverPoint,
+    hoverResizeSide,
+    movePreview,
+    project,
+    resizeBounds,
+    selection,
+    showGrid,
+    tool,
+    transparencyLineOpacity,
+    view,
+  ]);
   useEffect(() => { render(); }, [render]);
 
   const pointAt = useCallback((event: ReactPointerEvent<HTMLDivElement>): Point => {
     const rect = viewportRef.current!.getBoundingClientRect();
-    return { x: Math.floor((event.clientX - rect.left - view.panX) / view.zoom), y: Math.floor((event.clientY - rect.top - view.panY) / view.zoom) };
-  }, [view]);
+    const gridX = (event.clientX - rect.left - view.panX) / view.zoom;
+    const gridY = (event.clientY - rect.top - view.panY) / view.zoom;
+    const snapsToIntersection =
+      (tool === "square" || tool === "circle") && brushSize % 2 === 0;
+
+    return snapsToIntersection
+      ? { x: Math.round(gridX) - 1, y: Math.round(gridY) - 1 }
+      : { x: Math.floor(gridX), y: Math.floor(gridY) };
+  }, [brushSize, tool, view]);
+  const resizeSideAt = useCallback((clientX: number, clientY: number): ResizeSide | null => {
+    const viewport = viewportRef.current;
+    if (!viewport || !resizeBounds) return null;
+
+    const rect = viewport.getBoundingClientRect();
+    const localX = clientX - rect.left;
+    const localY = clientY - rect.top;
+    const centers = resizeHandleCenters(resizeBounds, view);
+    const sides: ResizeSide[] = ["left", "right", "top", "bottom"];
+    let closest: ResizeSide | null = null;
+    let closestDistance = RESIZE_HANDLE_RADIUS * RESIZE_HANDLE_RADIUS;
+
+    for (const side of sides) {
+      const deltaX = localX - centers[side].x;
+      const deltaY = localY - centers[side].y;
+      const distance = deltaX * deltaX + deltaY * deltaY;
+      if (distance <= closestDistance) {
+        closest = side;
+        closestDistance = distance;
+      }
+    }
+    return closest;
+  }, [resizeBounds, view]);
+
   const paint = useCallback((points: readonly Point[], erase: boolean) => {
-    if (!activeLayerId || (!erase && !currentColorId)) { onNotice("error", "Seleziona un livello e un colore prima di disegnare."); return; }
+    if (!activeLayerId || (!erase && !currentColorId)) { onNotice("error", "Select a layer and a color before drawing."); return; }
     setProject((current) => {
       if (!current) return current;
       const layer = current.layers.find((item) => item.id === activeLayerId);
@@ -271,7 +558,7 @@ export default function CanvasStage({
 
   const fillArea = useCallback((point: Point, erase: boolean) => {
     if (!activeLayerId || (!erase && !currentColorId)) {
-      onNotice("error", "Seleziona un livello e un colore prima di riempire.");
+      onNotice("error", "Select a layer and a color before filling.");
       return;
     }
     if (point.x < 0 || point.y < 0 || point.x >= project.width || point.y >= project.height) return;
@@ -320,6 +607,7 @@ export default function CanvasStage({
     drawingRef.current = null;
     panningRef.current = null;
     selectingRef.current = null;
+    resizeDragRef.current = null;
     movingRef.current = null;
     setMovePreview(null);
     setIsPanning(false);
@@ -336,8 +624,33 @@ export default function CanvasStage({
       return;
     }
 
+    if (resizeBounds) {
+      event.preventDefault();
+      if (event.button !== 0) return;
+      const side = resizeSideAt(event.clientX, event.clientY);
+      if (!side) return;
+      event.currentTarget.setPointerCapture(event.pointerId);
+      resizeDragRef.current = {
+        pointerId: event.pointerId,
+        side,
+        startX: event.clientX,
+        startY: event.clientY,
+        initial: { ...resizeBounds },
+      };
+      setHoverPoint(null);
+      setHoverResizeSide(side);
+      return;
+    }
+
     const point = pointAt(event);
     if (tool === "select") {
+      if (event.button === 2) {
+        event.preventDefault();
+        selectingRef.current = null;
+        setMovePreview(null);
+        setSelection(null);
+        return;
+      }
       if (event.button !== 0) return;
       event.preventDefault();
       event.currentTarget.setPointerCapture(event.pointerId);
@@ -348,6 +661,13 @@ export default function CanvasStage({
     }
 
     if (tool === "move") {
+      if (event.button === 2) {
+        event.preventDefault();
+        movingRef.current = null;
+        setMovePreview(null);
+        setSelection(null);
+        return;
+      }
       if (event.button !== 0 || !selection) return;
       const isInside = point.x >= selection.x && point.y >= selection.y && point.x < selection.x + selection.width && point.y < selection.y + selection.height;
       if (!isInside) return;
@@ -383,6 +703,42 @@ export default function CanvasStage({
       return;
     }
 
+    if (resizeBounds) {
+      const drag = resizeDragRef.current;
+      if (drag?.pointerId === event.pointerId) {
+        const deltaX = Math.round((event.clientX - drag.startX) / view.zoom);
+        const deltaY = Math.round((event.clientY - drag.startY) / view.zoom);
+        const nextBounds = { ...drag.initial };
+        if (drag.side === "left") {
+          nextBounds.left = Math.min(
+            drag.initial.left + deltaX,
+            drag.initial.right - 1,
+          );
+        } else if (drag.side === "right") {
+          nextBounds.right = Math.max(
+            drag.initial.right + deltaX,
+            drag.initial.left + 1,
+          );
+        } else if (drag.side === "top") {
+          nextBounds.top = Math.min(
+            drag.initial.top + deltaY,
+            drag.initial.bottom - 1,
+          );
+        } else {
+          nextBounds.bottom = Math.max(
+            drag.initial.bottom + deltaY,
+            drag.initial.top + 1,
+          );
+        }
+        onResizeBoundsChange(nextBounds);
+        setHoverResizeSide(drag.side);
+      } else {
+        setHoverResizeSide(resizeSideAt(event.clientX, event.clientY));
+      }
+      setHoverPoint(null);
+      return;
+    }
+
     const next = pointAt(event);
     setHoverPoint((current) => current?.x === next.x && current.y === next.y ? current : next);
     const selecting = selectingRef.current;
@@ -412,13 +768,20 @@ export default function CanvasStage({
     setView((current) => { const zoom = clamp(current.zoom * (event.deltaY < 0 ? 1.12 : 1 / 1.12), MIN_ZOOM, MAX_ZOOM); const scale = zoom / current.zoom; return { zoom, panX: x - (x - current.panX) * scale, panY: y - (y - current.panY) * scale }; });
   }
 
+  const activeResizeSide = resizeDragRef.current?.side ?? hoverResizeSide;
   const cursor = isPanning
     ? "grabbing"
-    : tool === "move"
-      ? "move"
-      : eraserMode
-        ? "cell"
-        : "crosshair";
+    : resizeBounds
+      ? activeResizeSide === "left" || activeResizeSide === "right"
+        ? "ew-resize"
+        : activeResizeSide === "top" || activeResizeSide === "bottom"
+          ? "ns-resize"
+          : "default"
+      : tool === "move"
+        ? "move"
+        : eraserMode
+          ? "cell"
+          : "crosshair";
 
   return (
     <div
@@ -433,7 +796,10 @@ export default function CanvasStage({
       }}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
-      onPointerLeave={() => setHoverPoint(null)}
+      onPointerLeave={() => {
+        setHoverPoint(null);
+        if (!resizeDragRef.current) setHoverResizeSide(null);
+      }}
       onPointerUp={(event) => finishPointer(event, true)}
       onPointerCancel={(event) => finishPointer(event, false)}
       onAuxClick={(event) => {
@@ -442,19 +808,8 @@ export default function CanvasStage({
       onContextMenu={(event) => event.preventDefault()}
       onWheel={onWheel}
     >
-      <canvas ref={canvasRef} aria-label="Canvas pixel art" />
-      <div
-        className="canvas-overlay"
-        aria-hidden="true"
-        style={{
-          position: "absolute",
-          right: 12,
-          bottom: 12,
-          pointerEvents: "none",
-        }}
-      >
-        {Math.round(view.zoom * 100)}% · Tasto centrale trascina · Rotella zoom
-      </div>
+      <canvas ref={canvasRef} aria-label="Pixel art canvas" />
+
     </div>
   );
 }
