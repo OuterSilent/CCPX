@@ -1,6 +1,6 @@
 {
-  "name": "pixel-studio",
-  "version": "0.1.0",
+  "name": "ccpx",
+  "version": "1.0.3",
   "private": true,
   "engines": {
     "node": ">=22.13.0"
@@ -8,7 +8,8 @@
   "scripts": {
     "dev": "vinext dev",
     "build": "vinext build",
-    "start": "vinext start"
+    "start": "vinext start",
+    "deploy": "npm run build && wrangler deploy"
   },
   "dependencies": {
     "next": "16.2.6",

@@ -29,3 +29,11 @@ npm start
 ```
 
 The production target is Cloudflare Workers through Vinext.
+
+## Deploy
+
+After authenticating Wrangler with Cloudflare:
+
+```bash
+npm run deploy
+```
